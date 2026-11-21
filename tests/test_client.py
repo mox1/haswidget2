@@ -77,6 +77,14 @@ def _check_ssdp_parsing():
     assert found.host == "192.0.2.130" and found.friendly_name == "erv"
 
 
+async def _check_socket_close_keeps_loop_running():
+    # ssdp 1.1.1 stops the event loop in connection_lost; that crashed Home Assistant
+    protocol = discovery.SwidgetProtocol()
+    protocol.connection_lost(None)
+    protocol.error_received(OSError("network unreachable"))
+    await asyncio.sleep(0)  # asyncio.run raises "Event loop stopped" if the loop was stopped
+
+
 async def _check_discover_single_cleanup():
     closed = []
 
@@ -125,6 +133,7 @@ async def _check_discover_single_cleanup():
 def test_client():
     asyncio.run(_check_request_errors())
     _check_ssdp_parsing()
+    asyncio.run(_check_socket_close_keeps_loop_running())
     asyncio.run(_check_discover_single_cleanup())
 
 

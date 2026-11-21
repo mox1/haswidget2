@@ -43,6 +43,14 @@ class SwidgetProtocol(ssdp.SimpleServiceDiscoveryProtocol):
         except Exception:  # pylint: disable=broad-except
             _LOGGER.debug("Ignoring a malformed SSDP reply from %s", addr[0], exc_info=True)
 
+    def connection_lost(self, exc):
+        # Never call the ssdp base class here: it stops the event loop, which stops Home Assistant
+        pass
+
+    def error_received(self, exc):
+        # The base class raises here; a failed send must not reach the event loop's error log
+        _LOGGER.debug("SSDP socket error: %s", exc)
+
     def response_received(self, response: ssdp.SSDPResponse, addr: tuple):
         "Handle an incoming response."
         headers = {name.upper(): value for name, value in response.headers}
