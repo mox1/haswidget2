@@ -111,6 +111,7 @@ class SwidgetSmartDimmer(CoordinatedSwidgetEntity, LightEntity):
         """Return the brightness of this light between 0..255."""
         return round((self.device.brightness * 255.0) / 100.0)
 
+    @async_refresh_after
     async def set_default_brightness(self, **kwargs: Any) -> None:
         if BRIGHTNESS in kwargs:
             await self.device.set_default_brightness(kwargs[BRIGHTNESS])

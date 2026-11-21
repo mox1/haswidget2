@@ -2,14 +2,16 @@ import json
 import logging
 import time
 
-from aiohttp import ClientSession, TCPConnector
+from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector
 from enum import auto, Enum
 from typing import Any, Dict, List
 
-from .exceptions import SwidgetException
+from .exceptions import SwidgetAuthError, SwidgetException
 from .websocket import SwidgetWebsocket
 
 _LOGGER = logging.getLogger(__name__)
+# Without it aiohttp waits up to 5 minutes for a device that accepts the connection but never answers
+HTTP_TIMEOUT = ClientTimeout(total=10)
 
 
 class DeviceType(Enum):
@@ -34,6 +36,7 @@ class SwidgetDevice:
         connector = TCPConnector(force_close=True)
         self._session = ClientSession(headers=headers, connector=connector)
         self._last_update = None
+        self.device_config = {}
         self._update_listeners = []
         self._websocket = None
         if self.use_websockets:
@@ -86,13 +89,26 @@ class SwidgetDevice:
                                 self.ip_address, type(error).__name__)
         self._notify_listeners()
 
+    async def _request(self, method: str, path: str, data: str | None = None, parse_json: bool = True) -> Any:
+        """Send one HTTP request; raise SwidgetException (SwidgetAuthError for a bad key) on any failure."""
+        try:
+            async with self._session.request(
+                method, f"https://{self.ip_address}{path}", data=data, ssl=self.ssl, timeout=HTTP_TIMEOUT
+            ) as response:
+                if response.status in (401, 403):
+                    raise SwidgetAuthError(f"Swidget {self.ip_address} rejected the access key (HTTP {response.status})")
+                if response.status != 200:
+                    raise SwidgetException(f"Swidget {self.ip_address}: {method} {path} failed with HTTP {response.status}")
+                return await response.json(content_type=None) if parse_json else None
+        except (ClientError, TimeoutError, ValueError) as error:
+            # str(), never repr(): an aiohttp repr can include the request headers, which carry the key
+            raise SwidgetException(
+                f"Swidget {self.ip_address}: {method} {path} failed: {type(error).__name__}: {error}"
+            ) from error
+
     async def get_summary(self):
         """Get a summary of the device over HTTP"""
-        async with self._session.get(
-            url=f"https://{self.ip_address}/api/v1/summary", ssl=self.ssl
-        ) as response:
-            summary = await response.json()
-        await self.process_summary(summary)
+        await self.process_summary(await self._request("GET", "/api/v1/summary"))
 
     async def process_summary(self, summary):
         """ Process the data around the summary of the device"""
@@ -110,11 +126,7 @@ class SwidgetDevice:
 
     async def get_state(self):
         """ Get the state of the device over HTTP"""
-        async with self._session.get(
-            url=f"https://{self.ip_address}/api/v1/state", ssl=self.ssl
-        ) as response:
-            state = await response.json()
-        await self.process_state(state)
+        await self.process_state(await self._request("GET", "/api/v1/state"))
 
     async def process_state(self, state):
         """ Process any information about the state of the device or insert"""
@@ -139,13 +151,10 @@ class SwidgetDevice:
 
     async def get_friendly_name(self):
         try:
-            async with self._session.get(
-                url=f"https://{self.ip_address}/api/v1/name", ssl=self.ssl
-            ) as response:
-                name = await response.json()
-        except Exception:
-            name = {"name": f"Swidget {self.device_type} w/{self.insert_type} insert"}
-        await self.process_friendly_name(name['name'])
+            name = (await self._request("GET", "/api/v1/name"))["name"]
+        except (SwidgetException, KeyError, TypeError):
+            name = f"Swidget {self.device_type} w/{self.insert_type} insert"
+        await self.process_friendly_name(name)
 
     async def process_friendly_name(self, name):
         self._friendly_name = name
@@ -161,15 +170,13 @@ class SwidgetDevice:
         data = json.dumps({"type":"config","request_id":"abcd", "payload": payload})
         await self._websocket.send_str(data)
 
+    async def get_device_config(self):
+        """Read the device config (the settings on the device's own web page)."""
+        self.device_config = await self._request("GET", "/api/v1/device_config")
+
     async def update_device_config(self, config: dict):
         """Merge settings into the device config, as its web page does (e.g. {"led": {"lightSuppress": False}})."""
-        async with self._session.post(
-            url=f"https://{self.ip_address}/api/v1/device_config",
-            ssl=self.ssl,
-            data=json.dumps(config),
-        ) as response:
-            if response.status != 200:
-                raise SwidgetException(f"device_config update failed with HTTP {response.status}")
+        await self._request("POST", "/api/v1/device_config", json.dumps(config))
 
     async def set_indicator_light(self, show_host_state: bool | None = None, brightness: int | None = None):
         """Set the indicator light: whether it shows the host's on/off state, and its brightness (0-100)."""
@@ -194,43 +201,16 @@ class SwidgetDevice:
                                })
             await self._websocket.send_str(data)
         else:
-            async with self._session.post(
-                url=f"https://{self.ip_address}/api/v1/command",
-                ssl=self.ssl,
-                data=json.dumps(data),
-            ) as response:
-                state = await response.json()
-
+            state = await self._request("POST", "/api/v1/command", json.dumps(data))
             function_value = state[assembly]["components"][component][function]
             self.assemblies[assembly].components[component].functions[function] = function_value  # fmt: skip
-
-    async def ping(self):
-        """Ping the device to ensure it's devices
-
-        :raises SwidgetException: Raise the exception if there we are unable to connect to the Swidget device
-        """
-        try:
-            async with self._session.get(
-                url=f"https://{self.ip_address}/ping",
-                ssl=self.ssl
-            ) as response:
-                return response.text
-        except:
-            raise SwidgetException
 
     async def blink(self):
         """Make the device LED blink
 
         :raises SwidgetException: Raise the exception if there we are unable to connect to the Swidget device
         """
-        try:
-            async with self._session.get(
-                url=f"https://{self.ip_address}/blink?x-user-key=dqMMBX9deuwtkkp784ewTjqo76IYfThV",
-                ssl=self.ssl
-            ) as response:
-                return response.text
-        except:
-            raise SwidgetException
+        await self._request("GET", "/blink?x-user-key=dqMMBX9deuwtkkp784ewTjqo76IYfThV", parse_json=False)
 
     @property
     def hw_info(self) -> Dict:
@@ -261,15 +241,6 @@ class SwidgetDevice:
                     return None
             return return_dict
         return self.assemblies['host'].components[str(plug_id)].functions['power']['current']
-
-    async def total_consumption(self):
-        """Get the total power consumption in watts."""
-        # await self.get_state()
-        total_consumption = 0
-        for id, properties in self.assemblies['host'].components.items():
-            print(vars(properties))
-            total_consumption += properties.functions['power']['current']
-        return total_consumption
 
     @property
     def realtime_values(self):
@@ -328,6 +299,11 @@ class SwidgetDevice:
     def is_pana_switch(self) -> bool:
         """Return True if the device is a pana_switch"""
         return self.device_type == "pana_switch"
+
+    @property
+    def is_erv(self) -> bool:
+        """Return True if the device is a Panasonic ERV (e.g. pesna_IB150)"""
+        return self.device_type.startswith("pesna_")
 
     @property
     def is_dimmer(self) -> bool:

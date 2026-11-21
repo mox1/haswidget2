@@ -5,10 +5,12 @@ from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, TypeVar
 
 from .swidgetclient.device import SwidgetDevice
+from .swidgetclient.exceptions import SwidgetException
 from typing_extensions import Concatenate, ParamSpec
 
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
@@ -24,7 +26,11 @@ def async_refresh_after(
     """Define a wrapper to refresh after."""
 
     async def _async_wrap(self: _T, *args: _P.args, **kwargs: _P.kwargs) -> None:
-        await func(self, *args, **kwargs)
+        try:
+            await func(self, *args, **kwargs)
+        except SwidgetException as err:
+            # Home Assistant logs this as one line; any other exception logs a full traceback
+            raise HomeAssistantError(str(err)) from err
         await self.coordinator.async_request_refresh_without_children()
 
     return _async_wrap
@@ -47,6 +53,8 @@ class CoordinatedSwidgetEntity(CoordinatorEntity[SwidgetDataUpdateCoordinator]):
         self._attr_name = self.device.mac_address.replace(":", "").upper()
         self._attr_unique_id = self.device.id
         self._unique_id_prefix = unique_id_prefix(device)
+        # ERV entities start with the device name ("erv Mode"); older types keep their bare names
+        self._attr_has_entity_name = device.is_erv
 
     @property
     def available(self) -> bool:
@@ -69,3 +77,10 @@ class CoordinatedSwidgetEntity(CoordinatorEntity[SwidgetDataUpdateCoordinator]):
     def is_on(self) -> bool:
         """Return true if switch is on."""
         return bool(self.device.is_on)
+
+    @async_refresh_after
+    async def set_indicator_light(self, **kwargs: Any) -> None:
+        """Handle the set_indicator_light action, which can target any Swidget switch."""
+        await self.device.set_indicator_light(
+            show_host_state=kwargs.get("show_host_state"), brightness=kwargs.get("brightness")
+        )

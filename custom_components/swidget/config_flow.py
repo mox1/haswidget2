@@ -5,19 +5,18 @@ import logging
 from typing import Any
 from urllib.parse import urlparse
 
-from .swidgetclient.discovery import SwidgetDiscoveredDevice
-from homeassistant.helpers.device_registry import format_mac
+from .swidgetclient.discovery import SwidgetDiscoveredDevice, _get_device_class
 from . import async_discover_devices
 from .swidgetclient.device import SwidgetDevice
-from .swidgetclient.exceptions import SwidgetException
+from .swidgetclient.exceptions import SwidgetAuthError, SwidgetUnsupportedDevice
 import voluptuous as vol
 from homeassistant.helpers.typing import DiscoveryInfoType
 
 
 from homeassistant import config_entries
+from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_DEVICE, CONF_HOST, CONF_MAC
-from homeassistant.core import callback, HomeAssistant
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.exceptions import HomeAssistantError
 
@@ -25,7 +24,6 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-# TODO adjust the data schema to the data that you need
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Optional(CONF_HOST, default=""): str,
@@ -41,71 +39,88 @@ STEP_RECONFIGURE_DATA_SCHEMA = vol.Schema(
     }
 )
 
-
-class PlaceholderHub:
-    """Placeholder class to make tests pass.
-
-    TODO Remove this placeholder class and replace with things from your PyPI package.
-    """
-
-    def __init__(self, host: str) -> None:
-        """Initialize."""
-        self.host = host
-
-    async def authenticate(self, password: str) -> bool:
-        """Test if we can authenticate with the host."""
-        return True
+# Devices with authentication turned off accept an empty access key
+STEP_DISCOVERY_CONFIRM_SCHEMA = vol.Schema({vol.Optional("password", default=""): str})
 
 
 async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
-    """Validate the user input allows us to connect.
+    """Connect to the device and return its title and MAC.
 
-    Data has the keys from STEP_USER_DATA_SCHEMA with values provided by the user.
+    :raises InvalidAuth: the device rejected the access key
+    :raises UnsupportedDevice: the integration cannot set up this device type
+    :raises CannotConnect: any other failure
     """
-    # Return info that you want to store in the config entry.
-    d = SwidgetDevice(data['host'], data['password'], False)
+    d = SwidgetDevice(data[CONF_HOST], data["password"], False, use_websockets=False)
     try:
         await d.update()
+        _get_device_class(d.device_type)
+    except SwidgetAuthError as ex:
+        raise InvalidAuth from ex
+    except SwidgetUnsupportedDevice as ex:
+        raise UnsupportedDevice(str(ex)) from ex
     except Exception as ex:
+        _LOGGER.debug("Cannot set up Swidget at %s", data[CONF_HOST], exc_info=True)
         raise CannotConnect from ex
     finally:
         await d.close()
     return {"title": f"{d.friendly_name}", "mac": d.mac_address}
 
+
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Swidget."""
+
+    VERSION = 1
 
     def __init__(self) -> None:
         """Initialize the config flow."""
         self._discovered_devices: dict[str, SwidgetDiscoveredDevice] = {}
         self._discovered_device: SwidgetDiscoveredDevice | None = None
 
-    VERSION = 1
-    async def async_step_dhcp(self, discovery_info: dhcp.DhcpServiceInfo) -> FlowResult:
+    async def _async_create_validated_entry(
+        self, data: dict[str, Any], errors: dict[str, str]
+    ) -> ConfigFlowResult | None:
+        """Create the entry if the device answers; otherwise fill errors and return None."""
+        try:
+            info = await validate_input(self.hass, data)
+        except CannotConnect:
+            errors["base"] = "cannot_connect"
+        except InvalidAuth:
+            errors["base"] = "invalid_auth"
+        except UnsupportedDevice as ex:
+            _LOGGER.warning("%s", ex)
+            errors["base"] = "unsupported_device"
+        else:
+            # The MAC is the unique_id, so the same device cannot be added twice
+            await self.async_set_unique_id(dr.format_mac(info["mac"]), raise_on_progress=False)
+            self._abort_if_unique_id_configured(updates=data)
+            return self.async_create_entry(title=info["title"], data=data)
+        return None
+
+    async def async_step_dhcp(self, discovery_info) -> ConfigFlowResult:
         """Handle discovery via dhcp."""
         _LOGGER.debug("Swidget device found via DHCP: %s", discovery_info)
         return await self._async_handle_discovery(
             discovery_info.ip, discovery_info.macaddress
         )
 
-    async def async_step_ssdp(self, discovery_info: ssdp.SsdpServiceInfo) -> FlowResult:
+    async def async_step_ssdp(self, discovery_info) -> ConfigFlowResult:
         """Handle discovery via SSDP."""
         _LOGGER.debug("Swidget device found via SSDP: %s", discovery_info)
-        discovered_ip = urlparse(discovery_info.ssdp_headers["location"]).hostname
-        discovered_mac = format_mac(discovery_info.ssdp_headers["USN"].split("-")[-1])
-        return await self._async_handle_discovery(
-            discovered_ip, discovered_mac
-        )
+        discovered_ip = urlparse(discovery_info.ssdp_location or "").hostname
+        discovered_mac = (discovery_info.ssdp_usn or "").split("-")[-1]
+        if not discovered_ip or not discovered_mac:
+            return self.async_abort(reason="no_devices_found")
+        return await self._async_handle_discovery(discovered_ip, discovered_mac)
 
     async def async_step_integration_discovery(
         self, discovery_info: DiscoveryInfoType
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Handle integration discovery."""
         return await self._async_handle_discovery(
             discovery_info[CONF_HOST], discovery_info[CONF_MAC]
         )
 
-    async def _async_handle_discovery(self, host: str, mac: str) -> FlowResult:
+    async def _async_handle_discovery(self, host: str, mac: str) -> ConfigFlowResult:
         """Handle any discovery."""
         await self.async_set_unique_id(dr.format_mac(mac))
         self._abort_if_unique_id_configured(updates={CONF_HOST: host})
@@ -119,27 +134,19 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(
             dr.format_mac(mac), raise_on_progress=True
         )
-        _LOGGER.debug("SWIDGET: Moving to discovery_confirm()")
         return await self.async_step_discovery_confirm()
-
 
     async def async_step_discovery_confirm(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Confirm discovery."""
         assert self._discovered_device is not None
+        errors: dict[str, str] = {}
         if user_input is not None:
-            _LOGGER.debug("async_step_discovery_confirm()")
-            _LOGGER.debug(f"discovered_device {self._discovered_device}")
-            user_input['host'] = self._discovered_device.host
-            info = await validate_input(self.hass, user_input)
-            return self.async_create_entry(title=info["title"], data=user_input)
-            # TODO FIX FIX FIX
-            #self._discovered_device.password = user_input.get("password")
-            return self._async_create_entry_from_device(self._discovered_device)
-            # return self.async_create_entry(title=info["title"], data=user_input)
+            data = {CONF_HOST: self._discovered_device.host, "password": user_input.get("password", "")}
+            if result := await self._async_create_validated_entry(data, errors):
+                return result
 
-        self._set_confirm_only()
         placeholders = {
             "name": self._discovered_device.friendly_name,
             "host": self._discovered_device.host,
@@ -147,46 +154,34 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.context["title_placeholders"] = placeholders
         return self.async_show_form(
             step_id="discovery_confirm",
-            data_schema=vol.Schema({vol.Required("password"): str}),
-            description_placeholders=placeholders
+            data_schema=STEP_DISCOVERY_CONFIRM_SCHEMA,
+            description_placeholders=placeholders,
+            errors=errors,
         )
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Handle the initial step."""
-        errors = {}
+        errors: dict[str, str] = {}
         if user_input is not None:
-            # return self.async_show_form(
-            #     step_id="user", data_schema=STEP_USER_DATA_SCHEMA
-            # )
-            if not (host := user_input[CONF_HOST]):
+            if not user_input[CONF_HOST]:
                 return await self.async_step_pick_device()
-
-            try:
-                info = await validate_input(self.hass, user_input)
-            except CannotConnect:
-                errors["base"] = "cannot_connect"
-            except InvalidAuth:
-                errors["base"] = "invalid_auth"
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Unexpected exception")
-                errors["base"] = "unknown"
-            else:
-                return self.async_create_entry(title=info["title"], data=user_input)
+            if result := await self._async_create_validated_entry(user_input, errors):
+                return result
 
         return self.async_show_form(
             step_id="user",
-            data_schema=STEP_USER_DATA_SCHEMA,
-                errors=errors
+            data_schema=self.add_suggested_values_to_schema(STEP_USER_DATA_SCHEMA, user_input),
+            errors=errors,
         )
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Change the host or access key, keeping the entities."""
         entry = self._get_reconfigure_entry()
-        errors = {}
+        errors: dict[str, str] = {}
         if user_input is not None:
             data = {
                 CONF_HOST: user_input[CONF_HOST],
@@ -196,6 +191,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 info = await validate_input(self.hass, data)
             except CannotConnect:
                 errors["base"] = "cannot_connect"
+            except InvalidAuth:
+                errors["base"] = "invalid_auth"
+            except UnsupportedDevice:
+                errors["base"] = "unsupported_device"
             else:
                 if entry.unique_id and dr.format_mac(info["mac"]) != entry.unique_id:
                     return self.async_abort(reason="wrong_device")
@@ -212,29 +211,24 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_pick_device(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Handle the step to pick discovered device."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            # mac = user_input[CONF_DEVICE]
-            # await self.async_set_unique_id(mac, raise_on_progress=False)
-            # return self._async_create_entry_from_device(self._discovered_devices[mac])
-            _LOGGER.debug("Picked device %s", user_input.get("device"))
-            _LOGGER.debug(f"discovered devices: {self._discovered_devices[user_input['device']].__dict__}")
-            user_input['host'] = self._discovered_devices[user_input['device']].host
-            info = await validate_input(self.hass, user_input)
-            return self.async_create_entry(title=info["title"], data=user_input)
-
+            device = self._discovered_devices[user_input[CONF_DEVICE]]
+            data = {CONF_HOST: device.host, "password": user_input.get("password", "")}
+            if result := await self._async_create_validated_entry(data, errors):
+                return result
+        else:
+            self._discovered_devices = await async_discover_devices(self.hass)
 
         configured_devices = {
             entry.unique_id for entry in self._async_current_entries()
         }
-        _LOGGER.debug(f"Configured Devices: {self._async_current_entries()}")
-        self._discovered_devices = await async_discover_devices(self.hass)
-        _LOGGER.debug(f"Discovered Devices: {self._discovered_devices}")
         devices_name = {
             mac: f"{device.friendly_name} ({device.host})"
             for mac, device in self._discovered_devices.items()
-            if mac not in configured_devices
+            if dr.format_mac(mac) not in configured_devices
         }
         # Check if there is at least one device
         if not devices_name:
@@ -242,19 +236,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="pick_device",
             data_schema=vol.Schema({vol.Required(CONF_DEVICE): vol.In(devices_name),
-                        vol.Required("password"): str}),
+                                    vol.Optional("password", default=""): str}),
+            errors=errors,
         )
 
-    @callback
-    def _async_create_entry_from_device(self, device: SwidgetDiscoveredDevice) -> FlowResult:
-        """Create a config entry from a smart device."""
-        self._abort_if_unique_id_configured(updates={CONF_MAC: device.mac})
-        return self.async_create_entry(
-            title= device.friendly_name,
-            data={
-                CONF_HOST: device.host
-            },
-        )
 
 class CannotConnect(HomeAssistantError):
     """Error to indicate we cannot connect."""
@@ -262,3 +247,7 @@ class CannotConnect(HomeAssistantError):
 
 class InvalidAuth(HomeAssistantError):
     """Error to indicate there is invalid auth."""
+
+
+class UnsupportedDevice(HomeAssistantError):
+    """Error to indicate the device type is not supported."""

@@ -7,6 +7,7 @@ import logging
 from .swidgetclient.device import SwidgetDevice
 from .swidgetclient.exceptions import SwidgetException
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -22,6 +23,7 @@ class SwidgetDataUpdateCoordinator(DataUpdateCoordinator):
     def __init__(
         self,
         hass: HomeAssistant,
+        config_entry: ConfigEntry,
         device: SwidgetDevice,
     ) -> None:
         """Initialize DataUpdateCoordinator to gather data for specific device"""
@@ -29,6 +31,7 @@ class SwidgetDataUpdateCoordinator(DataUpdateCoordinator):
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=config_entry,
             name=device.ip_address,
             # No polling: the websocket pushes every change to the listener below
             update_interval=None,

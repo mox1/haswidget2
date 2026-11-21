@@ -19,6 +19,7 @@ from homeassistant.const import (
     UnitOfTemperature,
     UnitOfPressure,
     UnitOfRatio,
+    UnitOfVolumeFlowRate,
     PERCENTAGE,
     SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
 )
@@ -35,7 +36,7 @@ from .entity import CoordinatedSwidgetEntity
 _LOGGER = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class SwidgetSensorEntityDescription(SensorEntityDescription):
     """Describes A Swidget sensor entity."""
 
@@ -92,7 +93,6 @@ SWIDGET_SENSORS: tuple[SwidgetSensorEntityDescription, ...] = (
         key="Air Quality",
         device_class=SensorDeviceClass.AQI,
         state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement="AQI",
         name="Air Quality",
         emeter_attr="iaq",
         precision=0,
@@ -109,17 +109,91 @@ SWIDGET_SENSORS: tuple[SwidgetSensorEntityDescription, ...] = (
     SwidgetSensorEntityDescription(
         key="Volatile Organic Compounds",
         native_unit_of_measurement=UnitOfRatio.PARTS_PER_MILLION,
-        device_class=SensorDeviceClass.VOLATILE_ORGANIC_COMPOUNDS,
+        # VOLATILE_ORGANIC_COMPOUNDS takes µg/m³; the ppm class is _PARTS
+        device_class=SensorDeviceClass.VOLATILE_ORGANIC_COMPOUNDS_PARTS,
         state_class=SensorStateClass.MEASUREMENT,
         name="Volatile Organic Compounds",
         emeter_attr="tvoc",
         precision=1,
+    ),
+    # Panasonic ERV
+    SwidgetSensorEntityDescription(
+        key="Power",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Power",
+        emeter_attr="power",
+        precision=1,
+    ),
+    SwidgetSensorEntityDescription(
+        key="Supply airflow",
+        native_unit_of_measurement=UnitOfVolumeFlowRate.CUBIC_FEET_PER_MINUTE,
+        device_class=SensorDeviceClass.VOLUME_FLOW_RATE,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Supply airflow",
+        emeter_attr="supply_cfm",
+        precision=0,
+    ),
+    SwidgetSensorEntityDescription(
+        key="Exhaust airflow",
+        native_unit_of_measurement=UnitOfVolumeFlowRate.CUBIC_FEET_PER_MINUTE,
+        device_class=SensorDeviceClass.VOLUME_FLOW_RATE,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Exhaust airflow",
+        emeter_attr="exhaust_cfm",
+        precision=0,
+    ),
+    SwidgetSensorEntityDescription(
+        key="Indoor temperature",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Indoor temperature",
+        emeter_attr="indoors_temperature",
+        precision=1,
+    ),
+    SwidgetSensorEntityDescription(
+        key="Indoor humidity",
+        native_unit_of_measurement=PERCENTAGE,
+        device_class=SensorDeviceClass.HUMIDITY,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Indoor humidity",
+        emeter_attr="indoors_humidity",
+        precision=0,
+    ),
+    SwidgetSensorEntityDescription(
+        key="Outdoor temperature",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Outdoor temperature",
+        emeter_attr="outdoors_temperature",
+        precision=1,
+    ),
+    SwidgetSensorEntityDescription(
+        key="Outdoor humidity",
+        native_unit_of_measurement=PERCENTAGE,
+        device_class=SensorDeviceClass.HUMIDITY,
+        state_class=SensorStateClass.MEASUREMENT,
+        name="Outdoor humidity",
+        emeter_attr="outdoors_humidity",
+        precision=0,
+    ),
+    # normal, defrost, boost, humidity, auto, int, limit, balancing or unknown
+    SwidgetSensorEntityDescription(
+        key="Status",
+        icon="mdi:information-outline",
+        name="Status",
+        emeter_attr="status",
     ),
     SwidgetSensorEntityDescription(
         key="Signal Strength",
         device_class=SensorDeviceClass.SIGNAL_STRENGTH,
         native_unit_of_measurement=SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
         entity_category = EntityCategory.DIAGNOSTIC,
+        # It changes with almost every update, so it fills the recorder database; opt in
+        entity_registry_enabled_default=False,
         name="Signal Strength",
         emeter_attr="rssi",
     ),
@@ -136,6 +210,8 @@ def async_emeter_from_device(
             if val is True:
                 return "is_motion"
             return "is_no_motion"
+        if description.precision is None:
+            return val
         return round(cast(float, val), description.precision)
 
 
@@ -153,7 +229,8 @@ async def async_setup_entry(
         return [
             SwidgetSensor(device, coordinator, description)
             for description in SWIDGET_SENSORS
-            if async_emeter_from_device(device, description) is not None
+            # Key, not value: an ERV reading can be empty at startup (e.g. no airflow while off)
+            if description.emeter_attr in device.realtime_values
         ]
 
     entities.extend(_async_sensors_for_device(parent))

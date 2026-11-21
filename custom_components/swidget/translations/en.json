@@ -5,10 +5,13 @@
             "no_devices_found": "No devices found on the network",
             "single_instance_allowed": "Already configured. Only a single configuration possible.",
             "reconfigure_successful": "Re-configuration was successful",
-            "wrong_device": "That address belongs to a different Swidget device."
+            "wrong_device": "That address belongs to a different Swidget device.",
+            "already_in_progress": "Configuration of this device is already in progress."
         },
         "error": {
-            "cannot_connect": "Failed to connect"
+            "cannot_connect": "Failed to connect",
+            "invalid_auth": "The device rejected the access key.",
+            "unsupported_device": "This Swidget device type is not supported yet. The log names the type."
         },
         "flow_title": "{name} ({host})",
         "step": {
@@ -16,27 +19,33 @@
                 "description": "Do you want to setup Swidget devices?"
             },
             "discovery_confirm": {
+                "description": "Do you want to set up {name} ({host})? Leave the access key empty if the device has authentication turned off.",
                 "data": {
-                    "password": "Password"
-                },
-                "description": "Do you want to setup {name} ({host})?"
+                    "password": "Access key"
+                }
             },
             "pick_device": {
                 "data": {
-                    "device": "Device"
+                    "device": "Device",
+                    "password": "Access key"
                 }
             },
             "user": {
                 "data": {
-                    "host": "Host",
-                    "password": "Password"
+                    "host": "IP address or host name",
+                    "password": "Access key"
                 },
-                "description": "If you leave the host empty, discovery will be used to find devices."
+                "description": "Enter the IP address of the device. To search the network for devices instead, leave the address empty.",
+                "title": "Add a Swidget device",
+                "data_description": {
+                    "host": "For example 192.168.1.50. A DHCP reservation keeps the address from changing.",
+                    "password": "Leave empty if authentication is turned off on the device."
+                }
             },
             "reconfigure": {
                 "description": "Change the address or access key of {name}. Leave the access key empty to keep the current one.",
                 "data": {
-                    "host": "Host",
+                    "host": "IP address or host name",
                     "password": "Access key"
                 }
             }

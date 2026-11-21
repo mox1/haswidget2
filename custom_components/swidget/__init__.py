@@ -7,7 +7,7 @@ import logging
 import re
 
 from .swidgetclient.device import SwidgetDevice
-from .swidgetclient.exceptions import SwidgetException
+from .swidgetclient.exceptions import SwidgetAuthError, SwidgetException, SwidgetUnsupportedDevice
 from .swidgetclient.discovery import SwidgetDiscoveredDevice, discover_devices, discover_single
 
 from homeassistant import config_entries
@@ -17,14 +17,15 @@ from homeassistant.const import (
     CONF_NAME,
     CONF_HOST,
     CONF_MAC,
-    EVENT_HOMEASSISTANT_STARTED,
+    EVENT_HOMEASSISTANT_STOP,
 )
 
-from homeassistant.core import callback, HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.core import Event, callback, HomeAssistant
+from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 
 from .const import DOMAIN, PLATFORMS
@@ -34,7 +35,7 @@ from .entity import unique_id_prefix
 _LOGGER = logging.getLogger(__name__)
 DISCOVERY_INTERVAL = timedelta(minutes=15)
 # Before 0.0.4, unique_ids started with the device repr, which holds the IP:
-# "<pana_switch model HK_PICO_1 at 172.16.107.156>_controlled_outlet"
+# "<pana_switch model HK_PICO_1 at 192.0.2.15>_controlled_outlet"
 LEGACY_UNIQUE_ID = re.compile(r"^<.* at (?P<host>[^ >]+)(?: - update\(\) needed)?>_(?P<key>.+)$")
 
 
@@ -71,15 +72,19 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the Swidget component."""
     hass.data[DOMAIN] = {}
 
-    if discovered_devices := await async_discover_devices(hass):
-        async_trigger_discovery(hass, discovered_devices)
-
     async def _async_discovery(*_: Any) -> None:
-        if discovered := await async_discover_devices(hass):
+        try:
+            discovered = await async_discover_devices(hass)
+        except OSError as err:
+            # Discovery is optional (devices can be added by address); do not fail setup over it
+            _LOGGER.debug("Swidget SSDP discovery failed: %s", err)
+            return
+        if discovered:
             async_trigger_discovery(hass, discovered)
 
-    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _async_discovery)
-    async_track_time_interval(hass, _async_discovery, DISCOVERY_INTERVAL)
+    # After startup, so the 5 s SSDP search never delays Home Assistant starting
+    async_at_started(hass, _async_discovery)
+    async_track_time_interval(hass, _async_discovery, DISCOVERY_INTERVAL, cancel_on_shutdown=True)
     return True
 
 
@@ -90,18 +95,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         device: SwidgetDevice = await discover_single(entry.data['host'],
                                                       entry.data['password'],
                                                       False)
+    except (SwidgetAuthError, SwidgetUnsupportedDevice) as ex:
+        # Retrying cannot help: the key or the device itself must change
+        raise ConfigEntryError(f"{ex}. Use Reconfigure to change the address or access key.") from ex
     except SwidgetException as ex:
-        raise ConfigEntryNotReady from ex
+        # Home Assistant logs this once and retries with backoff (e.g. after a power outage)
+        raise ConfigEntryNotReady(str(ex)) from ex
+
+    if entry.unique_id is None:
+        # Entries added by address before 0.0.6 have no unique_id, so discovery could not match them
+        unique_id = dr.format_mac(device.mac_address)
+        if hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, unique_id) is None:
+            hass.config_entries.async_update_entry(entry, unique_id=unique_id)
 
     await async_migrate_unique_ids(hass, entry, device)
-    # session = async_get_clientsession(hass)
-    hass.data[DOMAIN][entry.entry_id] = SwidgetDataUpdateCoordinator(hass, device)
+    hass.data[DOMAIN][entry.entry_id] = SwidgetDataUpdateCoordinator(hass, entry, device)
     # hass.config_entries.async_setup_platforms(entry, PLATFORMS)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     # A background task of the entry, so HA cancels it on unload and on shutdown
     entry.async_create_background_task(
         hass, device._websocket.listen(), f"swidget websocket {entry.data['host']}"
     )
+
+    async def _async_close_on_stop(_event: Event) -> None:
+        # HA does not unload entries when it stops; an open session logs "Unclosed client session"
+        await device.close()
+
+    entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_close_on_stop))
     return True
 
 

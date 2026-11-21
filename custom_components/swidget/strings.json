@@ -3,37 +3,48 @@
     "flow_title": "{name} ({host})",
     "step": {
       "user": {
-        "description": "If you leave the host empty, discovery will be used to find devices.",
+        "description": "Enter the IP address of the device. To search the network for devices instead, leave the address empty.",
         "data": {
-          "host": "[%key:common::config_flow::data::host%]",
-          "password": "[%key:common::config_flow::data::password%]"
+          "host": "IP address or host name",
+          "password": "Access key"
+        },
+        "title": "Add a Swidget device",
+        "data_description": {
+          "host": "For example 192.168.1.50. A DHCP reservation keeps the address from changing.",
+          "password": "Leave empty if authentication is turned off on the device."
         }
       },
       "pick_device": {
         "data": {
-          "device": "Device"
+          "device": "Device",
+          "password": "Access key"
         }
       },
       "discovery_confirm": {
-        "description": "Do you want to setup {name} ({host})?",
-        "password": "[%key:common::config_flow::data::password%]"
+        "description": "Do you want to set up {name} ({host})? Leave the access key empty if the device has authentication turned off.",
+        "data": {
+          "password": "Access key"
+        }
       },
       "reconfigure": {
         "description": "Change the address or access key of {name}. Leave the access key empty to keep the current one.",
         "data": {
-          "host": "Host",
+          "host": "IP address or host name",
           "password": "Access key"
         }
       }
     },
     "error": {
-      "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]"
+      "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+      "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
+      "unsupported_device": "This Swidget device type is not supported yet. The log names the type."
     },
     "abort": {
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
       "no_devices_found": "[%key:common::config_flow::abort::no_devices_found%]",
       "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]",
-      "wrong_device": "That address belongs to a different Swidget device."
+      "wrong_device": "That address belongs to a different Swidget device.",
+      "already_in_progress": "[%key:common::config_flow::abort::already_in_progress%]"
     }
   }
 }

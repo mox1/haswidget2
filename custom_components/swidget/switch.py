@@ -6,6 +6,7 @@ import logging
 from typing import Any, Final, cast
 
 from .swidgetclient.device import SwidgetDevice
+from .swidgetclient.swidgeterv import SwidgetERV
 from .swidgetclient.swidgetoutlet import SwidgetOutlet
 from .swidgetclient.swidgetswitch import SwidgetSwitch
 
@@ -18,6 +19,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_platform
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
@@ -42,6 +44,17 @@ SWIDGET_SET_INDICATOR_LIGHT_SCHEMA = cv.make_entity_service_schema(
         vol.Optional(BRIGHTNESS): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
     }
 )
+# ERV device_config keys that hold 1/0
+ERV_SETTING_SWITCHES = {
+    "autoRuntime": "Intermittent runtime auto",
+    "intermittentMode": "Intermittent mode",
+    # Not bLS on the ERV panel: writing it does not change the panel. Likely the BLE mesh fan balancing flag.
+    "balancing": "Mesh balancing",
+    "humidityControl": "Humidity control",
+    "outsideHumidityCSensing": "Outside humidity sensing",
+    "supplyLimitLowTemp": "Supply limit at low temperature",
+    "supplyLimitHighHum": "Supply limit at high humidity",
+}
 
 
 async def async_setup_entry(
@@ -60,6 +73,12 @@ async def async_setup_entry(
         entities.append(SwidgetPlugSwitch(cast(SwidgetSwitch, coordinator.device), coordinator))
     if coordinator.device.insert_type == "USB":
         entities.append(SwidgetUSBSwitch(cast(SwidgetOutlet, coordinator.device), coordinator))
+    if coordinator.device.is_erv:
+        entities.extend(
+            SwidgetErvSettingSwitch(coordinator.device, coordinator, key, name)
+            for key, name in ERV_SETTING_SWITCHES.items()
+            if key in coordinator.device.settings
+        )
     async_add_entities(entities)
 
     platform = entity_platform.async_get_current_platform()
@@ -106,14 +125,10 @@ class SwidgetPlugSwitch(CoordinatedSwidgetEntity, SwitchEntity):
     def is_on(self) -> bool:
         return self.device.is_on
 
+    @async_refresh_after
     async def set_countdown_timer(self, **kwargs: Any) -> None:
         if DURATION in kwargs:
             await self.device.set_countdown_timer(kwargs[DURATION])
-
-    async def set_indicator_light(self, **kwargs: Any) -> None:
-        await self.device.set_indicator_light(
-            show_host_state=kwargs.get(SHOW_HOST_STATE), brightness=kwargs.get(BRIGHTNESS)
-        )
 
 
 class SwidgetUSBSwitch(CoordinatedSwidgetEntity, SwitchEntity):
@@ -144,3 +159,33 @@ class SwidgetUSBSwitch(CoordinatedSwidgetEntity, SwitchEntity):
     @property
     def is_on(self) -> bool:
         return self.device.usb_is_on
+
+
+class SwidgetErvSettingSwitch(CoordinatedSwidgetEntity, SwitchEntity):
+    """An on/off ERV setting, stored in the device config as 1 or 0."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(
+        self,
+        device: SwidgetERV,
+        coordinator: SwidgetDataUpdateCoordinator,
+        key: str,
+        name: str,
+    ) -> None:
+        super().__init__(device, coordinator)
+        self._key = key
+        self._attr_name = name
+        self._attr_unique_id = f"{self._unique_id_prefix}_{key}"
+
+    @property
+    def is_on(self) -> bool:
+        return bool(self.device.settings[self._key])
+
+    @async_refresh_after
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self.device.set_setting(self._key, 1)
+
+    @async_refresh_after
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self.device.set_setting(self._key, 0)

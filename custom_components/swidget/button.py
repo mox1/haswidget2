@@ -30,9 +30,10 @@ async def async_setup_entry(
 
     coordinator: SwidgetDataUpdateCoordinator = hass.data[DOMAIN][config_entry.entry_id]
 
-    async_add_entities(
-        [SwidgetIdentifyButton(coordinator.device, coordinator)]
-    )
+    entities: list[ButtonEntity] = [SwidgetIdentifyButton(coordinator.device, coordinator)]
+    if coordinator.device.is_erv:
+        entities.append(SwidgetErvFilterResetButton(coordinator.device, coordinator))
+    async_add_entities(entities)
 
 
 class SwidgetIdentifyButton(CoordinatedSwidgetEntity, ButtonEntity):
@@ -54,9 +55,27 @@ class SwidgetIdentifyButton(CoordinatedSwidgetEntity, ButtonEntity):
         self._attr_name = "Blink"
         self._attr_unique_id = f"{self._unique_id_prefix}_{self.entity_description.key}"
 
+    @async_refresh_after
     async def async_press(self) -> None:
         """Identify the device by making it blink."""
-        try:
-            await self.device.blink()
-        except SwidgetException:
-            _LOGGER.exception("An error occurred while identifying the Swidget device")
+        await self.device.blink()
+
+
+class SwidgetErvFilterResetButton(CoordinatedSwidgetEntity, ButtonEntity):
+    """Reset the ERV's filter run time after filter maintenance."""
+
+    _attr_icon = "mdi:air-filter"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(
+        self,
+        device: SwidgetDevice,
+        coordinator: SwidgetDataUpdateCoordinator,
+    ) -> None:
+        super().__init__(device, coordinator)
+        self._attr_name = "Reset filter"
+        self._attr_unique_id = f"{self._unique_id_prefix}_reset_filter"
+
+    @async_refresh_after
+    async def async_press(self) -> None:
+        await self.device.reset_filter()
