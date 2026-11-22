@@ -1,0 +1,162 @@
+# ERV CO2 control
+#
+# Every 5 minutes, this automation sets the airflow of a Panasonic ERV from the CO2 level:
+#   - Below 550 ppm, the ERV is off.
+#   - From 550 to 1000 ppm, the ERV runs on High. The exhaust ramps from 40 to 130 CFM, and the
+#     supply runs 20 CFM above it (60 to 150 CFM), for slight positive pressure in the house.
+#   - At 1000 ppm and above, supply and exhaust both run at 150 CFM, to move as much air as possible.
+#
+# Before you use it:
+#   1. Make a CO2 sensor in ppm, for example an average of all CO2 sensors (a "Combine the
+#      state of several sensors" helper). Put its entity ID in co2_sensor below.
+#   2. Replace "erv" in the three entity IDs below with your device name, for example
+#      fan.pana1_ventilation.
+#   3. Set Boost supply and exhaust airflow on the ERV to 150 CFM. The ERV lowers the High
+#      airflow if it is above the Boost airflow.
+#   4. Select the ventilation mode (normally Ventilate) yourself. This automation does not change it.
+#
+# To add it: in Home Assistant, create a new automation, select Edit in YAML, and paste this file.
+#
+# To see what it does: open the Logbook and look for "ERV CO2 control". Each run writes one line
+# with the CO2 level, the current and target airflow, and the decision. For every detail of a run,
+# open the automation and select Traces.
+#
+# The automation writes an airflow value only when it changes by at least cfm_step, because the
+# ERV saves each value in its memory. It changes only the High airflow; Low and Boost keep their values.
+
+alias: ERV CO2 control
+description: Ramps the ERV airflow with the household CO2 level.
+mode: single
+max_exceeded: silent
+
+variables:
+  co2_sensor: sensor.household_co2
+  erv_fan: fan.erv_ventilation
+  supply_airflow: number.erv_high_supply_airflow
+  exhaust_airflow: number.erv_high_exhaust_airflow
+  co2_off_below: 550      # ppm: below this, the ERV is off
+  co2_full_above: 1000    # ppm: at this level the supply reaches cfm_max (the exhaust stays supply_offset below)
+  hysteresis: 25          # ppm: once off, the ERV turns on again only at co2_off_below + hysteresis
+  co2_equal_above: 1000   # ppm: at or above this, supply and exhaust both run at cfm_max (no pressure offset)
+  cfm_min: 40             # CFM: lowest exhaust airflow; about 40 CFM is the lowest airflow on High
+  cfm_max: 150            # CFM: highest airflow; the FV-15ESC1 maximum
+  cfm_step: 10            # CFM: round to this step, and write only when the step changes
+  supply_offset: 20       # CFM: supply = exhaust + supply_offset, for slight positive pressure
+  debug: false             # write one Logbook line per run; set to false when the automation works
+
+triggers:
+  - trigger: time_pattern
+    minutes: "/5"
+
+actions:
+  # Skip the run while a value is missing, for example during startup or after a wrong entity ID
+  - variables:
+      problem: >-
+        {%- if not is_number(states(co2_sensor)) -%}
+          {{ co2_sensor }} is {{ states(co2_sensor) }}, not a number
+        {%- else -%}
+          {%- for entity in [erv_fan, supply_airflow, exhaust_airflow] if not has_value(entity) -%}
+            {{ entity }} is {{ states(entity) }}{{ '' if loop.last else '; ' }}
+          {%- endfor -%}
+        {%- endif -%}
+  - if:
+      - condition: template
+        value_template: "{{ problem | length > 0 }}"
+    then:
+      - if:
+          - condition: template
+            value_template: "{{ debug }}"
+        then:
+          - action: logbook.log
+            data:
+              name: ERV CO2 control
+              message: "skipped: {{ problem }}. Check the entity IDs at the top of the automation."
+      - stop: Skipped because a value is missing (see the Logbook)
+
+  - variables:
+      co2: "{{ states(co2_sensor) | float }}"
+      erv_on: "{{ is_state(erv_fan, 'on') }}"
+      supply_now: "{{ states(supply_airflow) | float(0) | round(0) | int }}"
+      exhaust_now: "{{ states(exhaust_airflow) | float(0) | round(0) | int }}"
+      # 0 means off. The exhaust ramps from cfm_min up to cfm_max - supply_offset, so that the supply
+      # (exhaust + supply_offset) reaches cfm_max at co2_full_above.
+      target_exhaust_cfm: >-
+        {%- if co2 < co2_off_below or (not erv_on and co2 < co2_off_below + hysteresis) -%}
+          0
+        {%- elif co2 >= co2_equal_above -%}
+          {{ cfm_max }}
+        {%- else -%}
+          {%- set top = cfm_max - supply_offset -%}
+          {%- set fraction = [1, (co2 - co2_off_below) / (co2_full_above - co2_off_below)] | min -%}
+          {%- set cfm = cfm_min + fraction * (top - cfm_min) -%}
+          {{ [top, [cfm_min, (cfm / cfm_step) | round(0) * cfm_step] | max] | min | int }}
+        {%- endif -%}
+      target_supply_cfm: "{{ [cfm_max, target_exhaust_cfm | int + supply_offset] | min | int }}"
+      # Write only when the value changes by at least cfm_step, because the ERV saves each write
+      set_supply: "{{ target_exhaust_cfm | int > 0 and (supply_now - target_supply_cfm | int) | abs >= cfm_step }}"
+      set_exhaust: "{{ target_exhaust_cfm | int > 0 and (exhaust_now - target_exhaust_cfm | int) | abs >= cfm_step }}"
+      set_high: "{{ target_exhaust_cfm | int > 0 and (not erv_on or state_attr(erv_fan, 'preset_mode') != 'High') }}"
+      decision: >-
+        {%- if target_exhaust_cfm | int == 0 -%}
+          {{ 'turn the ERV off' if erv_on else 'stay off' }} (it turns on at {{ co2_off_below + hysteresis }} ppm)
+        {%- else -%}
+          target {{ target_supply_cfm }}/{{ target_exhaust_cfm }} CFM
+          {{- ', write supply' if set_supply else '' }}
+          {{- ', write exhaust' if set_exhaust else '' }}
+          {{- ', set preset High' if set_high else '' }}
+          {{- '' if set_supply or set_exhaust or set_high else ', no change' }}
+        {%- endif -%}
+
+  - if:
+      - condition: template
+        value_template: "{{ debug }}"
+    then:
+      - action: logbook.log
+        data:
+          name: ERV CO2 control
+          entity_id: "{{ erv_fan }}"
+          message: >-
+            CO2 {{ co2 | round(0) | int }} ppm, ERV {{ states(erv_fan) }}
+            {{- ' (' ~ state_attr(erv_fan, 'preset_mode') ~ ')' if erv_on else '' }},
+            High airflow {{ supply_now }}/{{ exhaust_now }} CFM (supply/exhaust): {{ decision }}
+
+  - if:
+      - condition: template
+        value_template: "{{ target_exhaust_cfm | int == 0 }}"
+    then:
+      - if:
+          - condition: template
+            value_template: "{{ erv_on }}"
+        then:
+          - action: fan.turn_off
+            target:
+              entity_id: "{{ erv_fan }}"
+    else:
+      # Set the airflow first, so the ERV starts at the right value
+      - if:
+          - condition: template
+            value_template: "{{ set_supply }}"
+        then:
+          - action: number.set_value
+            target:
+              entity_id: "{{ supply_airflow }}"
+            data:
+              value: "{{ target_supply_cfm | int }}"
+      - if:
+          - condition: template
+            value_template: "{{ set_exhaust }}"
+        then:
+          - action: number.set_value
+            target:
+              entity_id: "{{ exhaust_airflow }}"
+            data:
+              value: "{{ target_exhaust_cfm | int }}"
+      - if:
+          - condition: template
+            value_template: "{{ set_high }}"
+        then:
+          - action: fan.turn_on
+            target:
+              entity_id: "{{ erv_fan }}"
+            data:
+              preset_mode: High

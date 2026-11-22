@@ -1,13 +1,24 @@
-# haswidget2
+# SwidgetERV
 
-A Home Assistant integration for Swidget devices on the local network. It needs Home Assistant 2026.7 or newer.
+A Home Assistant integration for Swidget devices on the local network, with support for Panasonic Intelli-Balance ERVs on the WP100PBA module. It is a fork of [michaelkkehoe/haswidget2](https://github.com/michaelkkehoe/haswidget2). It needs Home Assistant 2026.7 or newer.
+
+## Installation
+
+To install the integration with HACS, do these steps:
+
+1. In HACS, open the three-dot menu and select Custom repositories.
+2. Enter `https://github.com/mox1/haswidget2` and select the type Integration.
+3. Find SwidgetERV in HACS and select Download.
+4. Restart Home Assistant.
+
+If you copied the integration by hand before, delete the old `custom_components/swidget` folder first. Your devices and entities stay, because the integration domain is still `swidget`.
 
 ## Setup
 
 To add a device by its IP address, do these steps:
 
 1. In Home Assistant, open the Devices & services page.
-2. Select Add integration, then select Swidget. If the integration is already installed, open it and select Add device.
+2. Select Add integration, then select SwidgetERV. If the integration is already installed, open it and select Add device.
 3. Enter the IP address of the device.
 4. Enter the access key. If authentication is turned off on the device, leave the access key empty.
 
@@ -28,6 +39,10 @@ logger:
   logs:
     custom_components.swidget: debug
 ```
+
+## Examples
+
+[examples/automations/erv_co2_control.yaml](examples/automations/erv_co2_control.yaml) controls an ERV from the CO2 level in the house. Below 550 ppm the ERV is off. From 550 to 1000 ppm the airflow ramps up. The supply runs 20 CFM above the exhaust, to keep a slight positive pressure in the house. At 1000 ppm and above, both run at 150 CFM. The file explains how to add it and which values to change.
 
 ## Panasonic ERV (WP100PBA module)
 
