@@ -52,6 +52,13 @@ async def _check():
         assert values["indoors_temperature"] == 21 and values["outdoors_humidity"] is None  # 254 = no reading
         assert values["filter_clean"] is True and values["error"] is False
 
+        # Defrost: supply 0 and a placeholder outdoor reading. Keep the last real one until the supply runs again.
+        defrost = {"supply": {"cfm": 0}, "outdoors": {"temperature": 53}, "status": "defrost"}
+        await erv.process_state({"host": {"components": {"0": defrost}}})
+        assert erv.realtime_values["outdoors_temperature"] == 11 and erv.realtime_values["status"] == "defrost"
+        await erv.process_state({"host": {"components": {"0": {"supply": {"cfm": 85}, "outdoors": {"temperature": 8}}}}})
+        assert erv.realtime_values["outdoors_temperature"] == 8
+
         await erv.set_speed("boost")
         assert sent == [("boost", {"mode": "on"})] and erv.speed == "boost"
         # Leaving boost: boost off first, then the speed, or the ERV ends up on low

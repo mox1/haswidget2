@@ -1,48 +1,66 @@
 # ERV CO2 control
 #
+# ###########################################################################################
+# # WARNING: If you turn the ERV on by hand while the CO2 level is below 550 ppm, this        #
+# # automation turns it off again within 5 minutes. To keep the ERV on, turn off this        #
+# # automation first.                                                                         #
+# ###########################################################################################
+#
 # Every 5 minutes, this automation sets the airflow of a Panasonic ERV from the CO2 level:
-#   - Below 550 ppm, the ERV is off.
+#   - Below 550 ppm, the automation turns the ERV off.
 #   - From 550 to 1000 ppm, the ERV runs on High. The exhaust ramps from 40 to 130 CFM, and the
 #     supply runs 20 CFM above it (60 to 150 CFM), for slight positive pressure in the house.
 #   - At 1000 ppm and above, supply and exhaust both run at 150 CFM, to move as much air as possible.
 #
+# The automation turns the ERV on again (at 575 ppm) only if it turned the ERV off itself. It
+# records this in a Toggle helper. If you turn the ERV off, it stays off until you turn it on.
+# When the ERV starts or ends a defrost period, it reports off for up to a minute. The automation
+# does not turn it on at that moment, because it did not turn it off.
+#
 # Before you use it:
 #   1. Make a CO2 sensor in ppm, for example an average of all CO2 sensors (a "Combine the
 #      state of several sensors" helper). Put its entity ID in co2_sensor below.
-#   2. Replace "erv" in the three entity IDs below with your device name, for example
+#   2. Make a Toggle helper named "ERV off by automation" (Settings > Devices & services >
+#      Helpers > Create helper > Toggle). Put its entity ID in off_flag below.
+#   3. Replace "erv" in the three ERV entity IDs below with your device name, for example
 #      fan.pana1_ventilation.
-#   3. Set Boost supply and exhaust airflow on the ERV to 150 CFM. The ERV lowers the High
+#   4. Set Boost supply and exhaust airflow on the ERV to 150 CFM. The ERV lowers the High
 #      airflow if it is above the Boost airflow.
-#   4. Select the ventilation mode (normally Ventilate) yourself. This automation does not change it.
+#   5. Select the ventilation mode (normally Ventilate) yourself. This automation does not change it.
 #
 # To add it: in Home Assistant, create a new automation, select Edit in YAML, and paste this file.
+# Home Assistant does not keep these comments. The warning above is also in the description.
 #
-# To see what it does: open the Logbook and look for "ERV CO2 control". Each run writes one line
-# with the CO2 level, the current and target airflow, and the decision. For every detail of a run,
-# open the automation and select Traces.
+# To see what it does: set debug to true, open the Logbook and look for "ERV CO2 control". Each run
+# writes one line with the CO2 level, the current and target airflow, and the decision. For every
+# detail of a run, open the automation and select Traces.
 #
 # The automation writes an airflow value only when it changes by at least cfm_step, because the
 # ERV saves each value in its memory. It changes only the High airflow; Low and Boost keep their values.
 
 alias: ERV CO2 control
-description: Ramps the ERV airflow with the household CO2 level.
+description: >-
+  Ramps the ERV airflow with the household CO2 level. WARNING: if you turn the ERV on by hand
+  while CO2 is below 550 ppm, this automation turns it off again within 5 minutes. To keep the
+  ERV on, turn off this automation first.
 mode: single
 max_exceeded: silent
 
 variables:
   co2_sensor: sensor.household_co2
+  off_flag: input_boolean.erv_off_by_automation  # on while the ERV is off because of this automation
   erv_fan: fan.erv_ventilation
   supply_airflow: number.erv_high_supply_airflow
   exhaust_airflow: number.erv_high_exhaust_airflow
-  co2_off_below: 550      # ppm: below this, the ERV is off
+  co2_off_below: 550      # ppm: below this, the automation turns the ERV off
   co2_full_above: 1000    # ppm: at this level the supply reaches cfm_max (the exhaust stays supply_offset below)
-  hysteresis: 25          # ppm: once off, the ERV turns on again only at co2_off_below + hysteresis
+  hysteresis: 25          # ppm: the automation turns the ERV on again at co2_off_below + hysteresis
   co2_equal_above: 1000   # ppm: at or above this, supply and exhaust both run at cfm_max (no pressure offset)
   cfm_min: 40             # CFM: lowest exhaust airflow; about 40 CFM is the lowest airflow on High
   cfm_max: 150            # CFM: highest airflow; the FV-15ESC1 maximum
   cfm_step: 10            # CFM: round to this step, and write only when the step changes
   supply_offset: 20       # CFM: supply = exhaust + supply_offset, for slight positive pressure
-  debug: false             # write one Logbook line per run; set to false when the automation works
+  debug: false            # true writes one Logbook line per run
 
 triggers:
   - trigger: time_pattern
@@ -55,7 +73,7 @@ actions:
         {%- if not is_number(states(co2_sensor)) -%}
           {{ co2_sensor }} is {{ states(co2_sensor) }}, not a number
         {%- else -%}
-          {%- for entity in [erv_fan, supply_airflow, exhaust_airflow] if not has_value(entity) -%}
+          {%- for entity in [off_flag, erv_fan, supply_airflow, exhaust_airflow] if not has_value(entity) -%}
             {{ entity }} is {{ states(entity) }}{{ '' if loop.last else '; ' }}
           {%- endfor -%}
         {%- endif -%}
@@ -76,6 +94,7 @@ actions:
   - variables:
       co2: "{{ states(co2_sensor) | float }}"
       erv_on: "{{ is_state(erv_fan, 'on') }}"
+      off_by_automation: "{{ is_state(off_flag, 'on') }}"
       supply_now: "{{ states(supply_airflow) | float(0) | round(0) | int }}"
       exhaust_now: "{{ states(exhaust_airflow) | float(0) | round(0) | int }}"
       # 0 means off. The exhaust ramps from cfm_min up to cfm_max - supply_offset, so that the supply
@@ -97,13 +116,15 @@ actions:
       set_exhaust: "{{ target_exhaust_cfm | int > 0 and (exhaust_now - target_exhaust_cfm | int) | abs >= cfm_step }}"
       set_high: "{{ target_exhaust_cfm | int > 0 and (not erv_on or state_attr(erv_fan, 'preset_mode') != 'High') }}"
       decision: >-
-        {%- if target_exhaust_cfm | int == 0 -%}
+        {%- if not erv_on and not off_by_automation -%}
+          skip, because this automation did not turn the ERV off
+        {%- elif target_exhaust_cfm | int == 0 -%}
           {{ 'turn the ERV off' if erv_on else 'stay off' }} (it turns on at {{ co2_off_below + hysteresis }} ppm)
         {%- else -%}
           target {{ target_supply_cfm }}/{{ target_exhaust_cfm }} CFM
           {{- ', write supply' if set_supply else '' }}
           {{- ', write exhaust' if set_exhaust else '' }}
-          {{- ', set preset High' if set_high else '' }}
+          {{- (', turn on at High' if not erv_on else ', set preset High') if set_high else '' }}
           {{- '' if set_supply or set_exhaust or set_high else ', no change' }}
         {%- endif -%}
 
@@ -120,6 +141,11 @@ actions:
             {{- ' (' ~ state_attr(erv_fan, 'preset_mode') ~ ')' if erv_on else '' }},
             High airflow {{ supply_now }}/{{ exhaust_now }} CFM (supply/exhaust): {{ decision }}
 
+  # Leave the ERV off if this automation did not turn it off: you turned it off, or the ERV
+  # reports off for up to a minute at each defrost step
+  - condition: template
+    value_template: "{{ erv_on or off_by_automation }}"
+
   - if:
       - condition: template
         value_template: "{{ target_exhaust_cfm | int == 0 }}"
@@ -131,6 +157,9 @@ actions:
           - action: fan.turn_off
             target:
               entity_id: "{{ erv_fan }}"
+          - action: input_boolean.turn_on
+            target:
+              entity_id: "{{ off_flag }}"
     else:
       # Set the airflow first, so the ERV starts at the right value
       - if:
@@ -160,3 +189,11 @@ actions:
               entity_id: "{{ erv_fan }}"
             data:
               preset_mode: High
+      # The ERV is on now, so clear the flag: if you turn the ERV off later, it must stay off
+      - if:
+          - condition: template
+            value_template: "{{ off_by_automation }}"
+        then:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: "{{ off_flag }}"

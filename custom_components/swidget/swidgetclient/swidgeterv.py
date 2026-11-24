@@ -23,6 +23,14 @@ class SwidgetERV(SwidgetDevice):
         await super().get_state()
         await self.get_device_config()
 
+    async def process_state(self, state):
+        """Keep the last outdoor reading while the supply is 0: no outdoor air reaches the sensor then."""
+        outdoors = self._fan.get("outdoors")
+        await super().process_state(state)
+        # During defrost the ERV sends {"temperature": 53}, a placeholder, and no humidity
+        if (self._fan.get("supply") or {}).get("cfm") == 0:
+            self._fan["outdoors"] = outdoors
+
     @property
     def is_on(self) -> bool:
         return self._fan["toggle"]["state"] == "on"
